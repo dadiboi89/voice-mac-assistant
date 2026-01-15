@@ -1,9 +1,10 @@
 """
 Voice Listener - Handles voice input capture and speech-to-text
-Listens for wake word and converts voice commands to text
+Uses Whisper for free, offline speech recognition
 """
-
-import speech_recognition as sr
+import whisper
+import pyaudio
+import numpy as np
 from loguru import logger
 import threading
 import queue
@@ -12,32 +13,36 @@ import time
 
 class VoiceListener:
     """
-    Continuously listens for voice commands
+    Continuously listens for voice commands using Whisper
     - Detects wake word ("Hey Assistant" or similar)
     - Captures voice input
-    - Converts to text using speech recognition
+    - Converts to text using Whisper (free, offline)
     - Passes text to callback function
     """
     
-    def __init__(self, wake_word: str = "hey assistant", callback: Optional[Callable] = None):
+    def __init__(self, wake_word: str = "hey assistant", callback: Optional[Callable] = None, model_size: str = "base"):
         self.wake_word = wake_word.lower()
         self.callback = callback
-        self.recognizer = sr.Recognizer()
-        self.microphone = sr.Microphone()
         self.is_listening = False
         self.command_queue = queue.Queue()
         self.listen_thread = None
         
-        # Adjust for ambient noise
-        logger.info("Calibrating microphone for ambient noise...")
-        with self.microphone as source:
-            self.recognizer.adjust_for_ambient_noise(source, duration=1)
-        logger.info("Microphone calibrated")
-    
+        # Audio settings
+        self.CHUNK = 1024
+        self.FORMAT = pyaudio.paInt16
+        self.CHANNELS = 1
+        self.RATE = 16000
+        self.RECORD_SECONDS = 5
+        
+        # Initialize Whisper model
+        logger.info(f"Loading Whisper {model_size} model...")
+        self.model = whisper.load_model(model_size)
+        logger.info("Whisper model loaded")
+        
+        self.audio = pyaudio.PyAudio()
+        
     def start(self):
-        """
-        Start listening for voice commands in background thread
-        """
+        """Start listening for voice commands in background thread"""
         if self.is_listening:
             logger.warning("Already listening")
             return
@@ -48,96 +53,89 @@ class VoiceListener:
         logger.info(f"Voice listener started. Say '{self.wake_word}' to activate")
     
     def stop(self):
-        """
-        Stop listening
-        """
+        """Stop listening"""
         self.is_listening = False
         if self.listen_thread:
             self.listen_thread.join(timeout=2)
+        self.audio.terminate()
         logger.info("Voice listener stopped")
     
     def _listen_loop(self):
-        """
-        Main listening loop - runs in background thread
-        """
+        """Main listening loop - runs in background thread"""
         while self.is_listening:
             try:
-                # Listen for audio
-                with self.microphone as source:
-                    logger.debug("Listening...")
-                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
-                
-                # Convert to text
-                text = self._recognize_speech(audio)
+                audio_data = self._record_audio()
+                text = self._recognize_speech_whisper(audio_data)
                 
                 if text:
                     logger.info(f"Heard: {text}")
                     
-                    # Check for wake word
                     if self.wake_word in text.lower():
                         logger.info("Wake word detected!")
-                        # Remove wake word from command
                         command = text.lower().replace(self.wake_word, "").strip()
                         
                         if command:
                             logger.info(f"Command: {command}")
                             self._process_command(command)
                         else:
-                            # If no command after wake word, listen again for the actual command
                             self._wait_for_command()
-            
-            except sr.WaitTimeoutError:
-                # Timeout is normal, just continue listening
-                continue
+                
             except Exception as e:
                 logger.error(f"Error in listen loop: {e}")
-                time.sleep(1)  # Brief pause before retrying
+                time.sleep(1)
+    
+    def _record_audio(self) -> np.ndarray:
+        """Record audio from microphone"""
+        stream = self.audio.open(
+            format=self.FORMAT,
+            channels=self.CHANNELS,
+            rate=self.RATE,
+            input=True,
+            frames_per_buffer=self.CHUNK
+        )
+        
+        logger.debug("Listening...")
+        frames = []
+        
+        for _ in range(0, int(self.RATE / self.CHUNK * self.RECORD_SECONDS)):
+            data = stream.read(self.CHUNK)
+            frames.append(data)
+        
+        stream.stop_stream()
+        stream.close()
+        
+        audio_data = np.frombuffer(b''.join(frames), dtype=np.int16)
+        audio_data = audio_data.astype(np.float32) / 32768.0
+        
+        return audio_data
+    
+    def _recognize_speech_whisper(self, audio_data: np.ndarray) -> Optional[str]:
+        """Convert audio to text using Whisper"""
+        try:
+            result = self.model.transcribe(audio_data, fp16=False)
+            text = result["text"].strip()
+            return text if text else None
+        except Exception as e:
+            logger.error(f"Error recognizing speech with Whisper: {e}")
+            return None
     
     def _wait_for_command(self):
-        """
-        After wake word detected, wait for actual command
-        """
+        """After wake word detected, wait for actual command"""
         try:
             logger.info("Waiting for command...")
-            with self.microphone as source:
-                audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
+            audio_data = self._record_audio()
+            command = self._recognize_speech_whisper(audio_data)
             
-            command = self._recognize_speech(audio)
             if command:
                 logger.info(f"Command received: {command}")
                 self._process_command(command)
-        
-        except sr.WaitTimeoutError:
-            logger.warning("No command received after wake word")
         except Exception as e:
             logger.error(f"Error waiting for command: {e}")
     
-    def _recognize_speech(self, audio) -> Optional[str]:
-        """
-        Convert audio to text using Google Speech Recognition
-        """
-        try:
-            # Use Google's free speech recognition
-            text = self.recognizer.recognize_google(audio)
-            return text
-        except sr.UnknownValueError:
-            logger.debug("Could not understand audio")
-            return None
-        except sr.RequestError as e:
-            logger.error(f"Speech recognition service error: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Error recognizing speech: {e}")
-            return None
-    
     def _process_command(self, command: str):
-        """
-        Process recognized command
-        """
-        # Add to queue
+        """Process recognized command"""
         self.command_queue.put(command)
         
-        # Call callback if provided
         if self.callback:
             try:
                 self.callback(command)
@@ -145,24 +143,20 @@ class VoiceListener:
                 logger.error(f"Error in callback: {e}")
     
     def get_command(self, timeout: Optional[float] = None) -> Optional[str]:
-        """
-        Get next command from queue (blocking)
-        """
+        """Get next command from queue (blocking)"""
         try:
             return self.command_queue.get(timeout=timeout)
         except queue.Empty:
             return None
 
-# Example usage
 if __name__ == "__main__":
     def command_callback(cmd):
         print(f"Command received: {cmd}")
     
-    listener = VoiceListener(wake_word="hey assistant", callback=command_callback)
+    listener = VoiceListener(wake_word="hey assistant", callback=command_callback, model_size="base")
     listener.start()
     
     try:
-        # Keep running
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
