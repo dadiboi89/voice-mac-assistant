@@ -1,0 +1,38 @@
+# Core AI and LLM
+openai>=1.12.0
+anthropik>=0.18.0
+
+# Speech Recognition (Whisper)
+openai-whisper>=20231117
+faster-whisper>=0.10.0
+
+# Audio I/O
+pyaudio>=0.2.13
+speechrecognition>=3.10.0
+pvporcupine>=2.2.0  # Wake word detection
+
+# Text-to-Speech
+pyttsx3>=2.90
+
+# Mac Automation
+mac-pyxa>=0.1.0
+pyobjc>=9.2
+pyautogui>=0.9.54
+
+# Browser Automation (Comet-style)
+playwright>=1.40.0
+selenium>=4.16.0
+
+# Computer Vision (for screenshot analysis)
+pillow>=10.1.0
+opencv-python>=4.8.1
+
+# Async and Task Management
+aiohttp>=3.9.1
+asyncio>=3.4.3
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+rich>=13.7.0  # Beautiful terminal output
+loguru>=0.7.2  # Better logging
